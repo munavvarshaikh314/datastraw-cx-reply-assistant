@@ -46,6 +46,10 @@ class ConversationRepository(BaseRepository[Conversation]):
 
         query = (
             select(Conversation)
+            .options(
+                selectinload(Conversation.customer),
+                selectinload(Conversation.brand),
+            )
             .order_by(Conversation.updated_at.desc())
             .offset(offset)
             .limit(limit)

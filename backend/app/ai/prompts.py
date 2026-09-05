@@ -18,23 +18,56 @@ Rules:
 
 def build_reply_user_prompt(
     customer_message: str,
-    context: list[dict],
+    context: dict | list[dict],
 ) -> str:
-    context_text = "\n\n".join(
-        (
-            f"Title: {item.get('title', '')}\n"
-            f"Type: {item.get('document_type', '')}\n"
-            f"Content: {item.get('content', '')}"
+
+    context_blocks = []
+    documents = context
+    eligibility_verdict = None
+
+    if isinstance(context, dict):
+        documents = context.get("documents", [])
+        eligibility_verdict = context.get("eligibility_verdict")
+
+    for item in documents:
+        context_blocks.append(
+            f"""
+Title: {item.get("title", "")}
+Type: {item.get("document_type", "")}
+Content: {item.get("content", "")}
+""".strip()
         )
-        for item in context
-    )
+
+    if eligibility_verdict:
+        context_blocks.append(
+            f"""
+DETERMINISTIC ELIGIBILITY VERDICT:
+Applicable: {eligibility_verdict.get("applicable")}
+Eligible: {eligibility_verdict.get("eligible")}
+Action: {eligibility_verdict.get("action")}
+Reason: {eligibility_verdict.get("reason")}
+Refund window: {eligibility_verdict.get("refund_window_days")} days
+Days since delivery: {eligibility_verdict.get("days_since_delivery")}
+
+IMPORTANT:
+If Eligible is false or unknown, do NOT promise a refund.
+If Action is "do_not_promise", do not make a refund guarantee.
+""".strip()
+        )
+
+    context_text = "\n\n".join(context_blocks)
 
     return f"""
 Customer message:
 {customer_message}
 
-Relevant brand knowledge:
+Relevant brand knowledge and deterministic checks:
+
 {context_text or "No relevant knowledge was found."}
 
 Draft the best possible customer support reply.
+
+Follow the deterministic eligibility verdict.
+Do not promise a refund when eligibility is false or unknown.
+If required information is unavailable, recommend human review.
 """.strip()

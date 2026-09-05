@@ -1,4 +1,3 @@
-
 from datetime import datetime, timezone
 from time import perf_counter
 from uuid import UUID
@@ -13,13 +12,17 @@ from app.ai.prompts import (
 from app.core.config import settings
 from app.db.models.conversation import Conversation
 from app.db.models.reply_generation import ReplyGeneration
+from app.db.repositories.knowledge import KnowledgeRepository
 from app.db.repositories.reply_generation import ReplyGenerationRepository
+from app.services.eligibility import check_refund_eligibility
 from app.services.llm_service import LLMService
 from app.services.retrieval_service import RetrievalService
 
 
 class ReplyService:
-    """Orchestrates retrieval, guardrails, LLM generation, and persistence."""
+    """Orchestrates retrieval, eligibility guardrails,
+    LLM generation, and persistence.
+    """
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -36,7 +39,10 @@ class ReplyService:
     ) -> ReplyGeneration:
         """Generate and persist a grounded customer-support reply."""
 
+        # ---------------------------------------------------------
         # 1. Validate customer input
+        # ---------------------------------------------------------
+
         guardrail_result = (
             self.guardrail_service.validate_customer_message(
                 customer_message
@@ -51,27 +57,75 @@ class ReplyService:
 
         started_at = perf_counter()
 
+        # ---------------------------------------------------------
         # 2. Retrieve brand-specific knowledge
-        context = await self.retrieval_service.retrieve(
+        # ---------------------------------------------------------
+
+        context = await self._retrieve_context(
             query=customer_message,
-            brand_id=conversation.brand_id,
+            conversation=conversation,
         )
 
-        # 3. Build grounded prompt
+        # ---------------------------------------------------------
+        # 3. Extract refund policy from retrieved KB
+        # ---------------------------------------------------------
+
+        refund_window_days = self._extract_refund_window(context)
+
+        # ---------------------------------------------------------
+        # 4. Deterministic eligibility check
+        # ---------------------------------------------------------
+
+        order = conversation.order
+
+        eligibility = check_refund_eligibility(
+            customer_message=customer_message,
+            delivery_date=order.delivery_date if order else None,
+            refund_window_days=refund_window_days,
+        )
+
+        # ---------------------------------------------------------
+        # 5. Add deterministic verdict to audit context
+        # ---------------------------------------------------------
+
+        eligibility_verdict = {
+            "applicable": eligibility.applicable,
+            "eligible": eligibility.eligible,
+            "reason": eligibility.reason,
+            "action": eligibility.action,
+            "refund_window_days": eligibility.refund_window_days,
+            "days_since_delivery": eligibility.days_since_delivery,
+        }
+
+        audit_context = {
+            "documents": context,
+            "eligibility_verdict": eligibility_verdict,
+        }
+
+        # ---------------------------------------------------------
+        # 6. Build grounded prompt
+        # ---------------------------------------------------------
+
         system_prompt = build_reply_system_prompt()
 
         user_prompt = build_reply_user_prompt(
             customer_message=customer_message,
-            context=context,
+            context=audit_context,
         )
 
-        # 4. Generate response
+        # ---------------------------------------------------------
+        # 7. Generate AI response
+        # ---------------------------------------------------------
+
         ai_response = await self.llm_service.generate(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
         )
 
-        # 5. Validate generated response
+        # ---------------------------------------------------------
+        # 8. Validate generated response
+        # ---------------------------------------------------------
+
         generated_guardrail = (
             self.guardrail_service.validate_generated_reply(
                 ai_response
@@ -88,32 +142,104 @@ class ReplyService:
             (perf_counter() - started_at) * 1000
         )
 
-        # 6. Determine generation number
+        # ---------------------------------------------------------
+        # 9. Determine generation number
+        # ---------------------------------------------------------
+
         generation_number = (
             await self.repository.get_next_generation_number(
                 conversation.id
             )
         )
 
-        # 7. Create generation
+        # ---------------------------------------------------------
+        # 10. Persist generation + complete audit context
+        # ---------------------------------------------------------
+
         generation = ReplyGeneration(
             conversation_id=conversation.id,
             agent_id=agent_id,
             generation_number=generation_number,
             customer_message=customer_message,
-            retrieved_context=context,
+            retrieved_context=audit_context,
             ai_response=ai_response,
             status="generated",
             model=settings.openrouter_model,
             latency_ms=latency_ms,
         )
 
-        # 8. Persist generation
         await self.repository.create(generation)
 
         await self.session.flush()
 
         return generation
+
+    async def _retrieve_context(
+        self,
+        query: str,
+        conversation: Conversation,
+    ) -> list[dict]:
+        try:
+            context = await self.retrieval_service.retrieve(
+                query=query,
+                brand_id=conversation.brand_id,
+            )
+
+            if context:
+                return context
+        except Exception:
+            pass
+
+        knowledge_repository = KnowledgeRepository(self.session)
+        documents = await knowledge_repository.get_by_brand(
+            conversation.brand_id
+        )
+
+        return [
+            {
+                "id": str(document.id),
+                "score": None,
+                "title": document.title,
+                "content": document.content,
+                "document_type": document.document_type,
+                "brand_id": str(document.brand_id),
+                "version": document.version,
+                "source": "postgresql",
+            }
+            for document in documents
+        ]
+
+    @staticmethod
+    def _extract_refund_window(
+        context: list[dict],
+    ) -> int:
+        """
+        Extract the refund window from retrieved brand knowledge.
+
+        For the assignment, the KB should contain a numeric refund
+        window such as 7 days.
+        """
+
+        for item in context:
+            content = item.get("content", "").lower()
+
+            if "refund" not in content:
+                continue
+
+            import re
+
+            match = re.search(
+                r"(\d+)\s*[-]?\s*day",
+                content,
+            )
+
+            if match:
+                return int(match.group(1))
+
+        # No policy window found.
+        # Returning 0 means the deterministic check will not
+        # promise eligibility.
+        return 0
 
     async def update_reply(
         self,

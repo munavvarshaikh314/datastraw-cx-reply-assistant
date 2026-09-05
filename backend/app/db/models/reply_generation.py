@@ -61,10 +61,10 @@ class ReplyGeneration(Base):
         nullable=False,
     )
 
-    retrieved_context: Mapped[list] = mapped_column(
+    retrieved_context: Mapped[dict | list] = mapped_column(
         JSONB,
         nullable=False,
-        default=list,
+        default=dict,
     )
 
     ai_response: Mapped[str | None] = mapped_column(

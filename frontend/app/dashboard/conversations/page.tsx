@@ -1,14 +1,35 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  getConversations,
-  getConversation,
-  updateConversationStatus,
-  generateReply,
-  updateReply,
   approveReply,
+  generateReply,
+  getConversation,
+  getConversations,
+  updateConversationStatus,
+  updateReply,
 } from "../../../lib/api";
+
+type Customer = {
+  id: string;
+  name: string;
+  email?: string | null;
+};
+
+type Brand = {
+  id: string;
+  name: string;
+  slug: string;
+};
+
+type Order = {
+  id: string;
+  conversation_id: string;
+  order_number: string;
+  product_name: string;
+  status: string;
+  delivery_date?: string | null;
+};
 
 type Conversation = {
   id: string;
@@ -17,17 +38,15 @@ type Conversation = {
   status: string;
   created_at: string;
   updated_at: string;
+  customer?: Customer | null;
+  brand?: Brand | null;
 };
 
 type Message = {
   id: string;
-  content?: string;
-  message?: string;
-  text?: string;
-  body?: string;
-  message_text?: string;
-  role?: string;
-  sender_type?: string;
+  conversation_id?: string;
+  content: string;
+  sender_type: string;
   created_at: string;
 };
 
@@ -36,26 +55,70 @@ type Reply = {
   conversation_id: string;
   generation_number: number;
   customer_message: string;
+  retrieved_context?: {
+    documents?: unknown[];
+    eligibility_verdict?: {
+      applicable: boolean;
+      eligible: boolean | null;
+      reason: string;
+      action: string;
+      refund_window_days?: number | null;
+      days_since_delivery?: number | null;
+    };
+  };
   ai_response: string | null;
   edited_response: string | null;
   final_response: string | null;
   status: string;
+  created_at?: string;
+  approved_at?: string | null;
 };
 
 type ConversationDetail = Conversation & {
-  customer?: {
-    id: string;
-    name?: string;
-    email?: string;
-  };
-  messages?: Message[];
-  order?: {
-    id: string;
-    status?: string;
-  };
+  messages: Message[];
+  order?: Order | null;
 };
 
 const AGENT_ID = "afcf44aa-c4ca-4ec4-a887-a391b7475c86";
+
+function formatDate(value?: string | null) {
+  if (!value) return "Not available";
+
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "Not available";
+
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function statusClass(status: string) {
+  if (status === "approved" || status === "resolved") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  }
+
+  if (status === "edited" || status === "pending") {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+
+  return "border-sky-200 bg-sky-50 text-sky-700";
+}
+
+function latestCustomerMessage(messages: Message[]) {
+  return [...messages]
+    .reverse()
+    .find((message) => message.sender_type?.toLowerCase() === "customer");
+}
 
 export default function ConversationsPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -63,9 +126,19 @@ export default function ConversationsPage() {
   const [reply, setReply] = useState<Reply | null>(null);
   const [editedReply, setEditedReply] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingConversation, setLoadingConversation] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+
+  const latestMessage = useMemo(
+    () => latestCustomerMessage(selected?.messages ?? []),
+    [selected]
+  );
+
+  const replyText =
+    reply?.final_response || reply?.edited_response || reply?.ai_response || "";
+  const isApproved = reply?.status === "approved";
 
   async function loadConversations() {
     try {
@@ -74,9 +147,12 @@ export default function ConversationsPage() {
 
       const data = await getConversations();
       setConversations(data);
+
+      if (!selected && data.length > 0) {
+        await selectConversation(data[0].id);
+      }
     } catch (err) {
-      console.error(err);
-      setError("Failed to load conversations.");
+      setError(err instanceof Error ? err.message : "Failed to load conversations.");
     } finally {
       setLoading(false);
     }
@@ -84,6 +160,7 @@ export default function ConversationsPage() {
 
   async function selectConversation(id: string) {
     try {
+      setLoadingConversation(true);
       setError("");
 
       const data = await getConversation(id);
@@ -92,99 +169,61 @@ export default function ConversationsPage() {
       setReply(null);
       setEditedReply("");
     } catch (err) {
-      console.error(err);
-      setError("Failed to load conversation.");
+      setError(err instanceof Error ? err.message : "Failed to load conversation.");
+    } finally {
+      setLoadingConversation(false);
     }
   }
 
-const handleGenerateReply = async () => {
-  if (!selected) {
-    console.log("NO SELECTED CONVERSATION");
-    return;
+  async function handleGenerateReply() {
+    if (!selected || !latestMessage?.content) {
+      setError("No latest customer message found.");
+      return;
+    }
+
+    try {
+      setGenerating(true);
+      setError("");
+
+      const result = await generateReply(
+        selected.id,
+        latestMessage.content,
+        AGENT_ID
+      );
+
+      setReply(result);
+      setEditedReply(result.edited_response || result.ai_response || "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to generate reply.");
+    } finally {
+      setGenerating(false);
+    }
   }
 
-  console.log("SELECTED:", selected);
-  console.log("MESSAGES:", selected.messages);
-
-  const customerMessage = [...(selected.messages ?? [])]
-    .reverse()
-    .find(
-      (message: any) =>
-        message.sender_type?.toLowerCase() === "customer"
-    )?.content;
-
-  console.log("CUSTOMER MESSAGE:", customerMessage);
-
-  if (!customerMessage) {
-    setError("No customer message found.");
-    return;
+  async function handleRegenerateReply() {
+    await handleGenerateReply();
   }
-
-  try {
-    setGenerating(true);
-    setError("");
-
-    console.log("CALLING GENERATE REPLY API...");
-
-    const result = await generateReply(
-  selected.id,
-  customerMessage,
-  AGENT_ID
-);
-
-console.log("GENERATE RESULT:", result);
-
-setReply(result);
-
-setEditedReply(
-  result.ai_response || ""
-);
-
-setReply(result);
-
-setEditedReply(
-  result.edited_response ||
-  result.ai_response ||
-  ""
-);
-  } catch (error) {
-    console.error("GENERATE REPLY ERROR:", error);
-    setError(
-      error instanceof Error
-        ? error.message
-        : "Failed to generate reply"
-    );
-  } finally {
-    setGenerating(false);
-  }
-};
 
   async function handleSaveEdit() {
-    if (!reply) return;
+    if (!reply || isApproved || !editedReply.trim()) return;
 
     try {
       setSaving(true);
       setError("");
 
-      const result = await updateReply(
-        reply.id,
-        editedReply
-      );
+      const result = await updateReply(reply.id, editedReply);
 
       setReply(result);
-      setEditedReply(
-        result.edited_response || editedReply
-      );
+      setEditedReply(result.edited_response || editedReply);
     } catch (err) {
-      console.error(err);
-      setError("Failed to save reply.");
+      setError(err instanceof Error ? err.message : "Failed to save reply.");
     } finally {
       setSaving(false);
     }
   }
 
   async function handleApprove() {
-    if (!reply) return;
+    if (!reply || isApproved) return;
 
     try {
       setSaving(true);
@@ -194,14 +233,10 @@ setEditedReply(
 
       setReply(result);
       setEditedReply(
-        result.final_response ||
-        result.edited_response ||
-        result.ai_response ||
-        ""
+        result.final_response || result.edited_response || result.ai_response || ""
       );
     } catch (err) {
-      console.error(err);
-      setError("Failed to approve reply.");
+      setError(err instanceof Error ? err.message : "Failed to approve reply.");
     } finally {
       setSaving(false);
     }
@@ -213,12 +248,17 @@ setEditedReply(
     try {
       setError("");
 
-      const result = await updateConversationStatus(
-        selected.id,
-        newStatus
-      );
+      const result = await updateConversationStatus(selected.id, newStatus);
 
-      setSelected(result);
+      setSelected((current) =>
+        current
+          ? {
+              ...current,
+              status: result.status,
+              updated_at: result.updated_at,
+            }
+          : current
+      );
 
       setConversations((current) =>
         current.map((conversation) =>
@@ -232,314 +272,361 @@ setEditedReply(
         )
       );
     } catch (err) {
-      console.error(err);
-      setError("Failed to update conversation status.");
+      setError(
+        err instanceof Error ? err.message : "Failed to update conversation status."
+      );
     }
   }
 
   useEffect(() => {
     loadConversations();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
-    <main className="min-h-screen bg-gray-100">
-      <header className="border-b bg-white px-6 py-4">
-        <div className="flex items-center justify-between">
+    <main className="min-h-screen bg-[#f4f7fb] text-slate-950">
+      <header className="border-b border-slate-200 bg-white">
+        <div className="mx-auto flex max-w-[1600px] flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h1 className="text-xl font-bold text-gray-900">
-              DataStraw
-            </h1>
-
-            <p className="text-sm text-gray-500">
-              AI Customer Support Workspace
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-teal-700">
+              DataStraw CX
             </p>
+            <h1 className="mt-1 text-2xl font-semibold text-slate-950">
+              Support Reply Workspace
+            </h1>
           </div>
 
-          <button
-            onClick={loadConversations}
-            className="rounded-lg border bg-white px-4 py-2 text-sm hover:bg-gray-50"
-          >
-            Refresh
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+              {conversations.length} conversations
+            </div>
+            <button
+              onClick={loadConversations}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 shadow-sm transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={loading}
+            >
+              {loading ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
         </div>
       </header>
 
       {error && (
-        <div className="mx-6 mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
+        <div className="mx-auto mt-4 max-w-[1600px] px-4 sm:px-6">
+          <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
         </div>
       )}
 
-      <div className="grid min-h-[calc(100vh-81px)] grid-cols-[280px_1fr_300px]">
-
-        {/* LEFT */}
-        <aside className="border-r bg-white">
-          <div className="border-b px-5 py-4">
-            <h2 className="font-semibold text-gray-900">
+      <div className="mx-auto grid max-w-[1600px] gap-4 px-4 py-4 sm:px-6 xl:grid-cols-[minmax(260px,320px)_minmax(0,1fr)_minmax(300px,360px)]">
+        <aside className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm xl:min-h-[calc(100vh-126px)]">
+          <div className="border-b border-slate-200 px-4 py-3">
+            <h2 className="text-sm font-semibold text-slate-900">
               Conversations
             </h2>
-
-            <p className="mt-1 text-xs text-gray-500">
-              {conversations.length} conversations
-            </p>
           </div>
 
-          {loading ? (
-            <div className="p-5 text-sm text-gray-500">
-              Loading conversations...
-            </div>
-          ) : conversations.length === 0 ? (
-            <div className="p-5 text-sm text-gray-500">
-              No conversations found.
-            </div>
-          ) : (
-            conversations.map((conversation) => (
-              <button
-                key={conversation.id}
-                onClick={() =>
-                  selectConversation(conversation.id)
-                }
-                className={`w-full border-b px-5 py-4 text-left hover:bg-gray-50 ${
-                  selected?.id === conversation.id
-                    ? "bg-gray-100"
-                    : ""
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">
-                    Conversation
-                  </span>
+          <div className="max-h-90 overflow-y-auto xl:max-h-[calc(100vh-174px)]">
+            {loading ? (
+              <div className="p-4 text-sm text-slate-500">Loading conversations...</div>
+            ) : conversations.length === 0 ? (
+              <div className="p-4 text-sm text-slate-500">No conversations found.</div>
+            ) : (
+              conversations.map((conversation) => {
+                const active = selected?.id === conversation.id;
 
-                  <span className="rounded-full bg-gray-100 px-2 py-1 text-xs capitalize">
-                    {conversation.status}
-                  </span>
-                </div>
+                return (
+                  <button
+                    key={conversation.id}
+                    onClick={() => selectConversation(conversation.id)}
+                    className={`w-full border-b border-slate-100 px-4 py-4 text-left transition hover:bg-slate-50 ${
+                      active ? "bg-teal-50" : "bg-white"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-slate-950">
+                          {conversation.customer?.name || "Unknown customer"}
+                        </p>
+                        <p className="mt-1 truncate text-xs text-slate-500">
+                          {conversation.brand?.name || conversation.brand_id}
+                        </p>
+                      </div>
 
-                <p className="mt-2 truncate text-xs text-gray-500">
-                  {conversation.id}
-                </p>
-              </button>
-            ))
-          )}
+                      <span
+                        className={`shrink-0 rounded-full border px-2 py-1 text-[11px] font-medium capitalize ${statusClass(
+                          conversation.status
+                        )}`}
+                      >
+                        {conversation.status}
+                      </span>
+                    </div>
+
+                    <p className="mt-3 truncate text-xs text-slate-400">
+                      Updated {formatDateTime(conversation.updated_at)}
+                    </p>
+                  </button>
+                );
+              })
+            )}
+          </div>
         </aside>
 
-        {/* CENTER */}
-        <section className="flex min-w-0 flex-col">
+        <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm xl:min-h-[calc(100vh-126px)]">
           {!selected ? (
-            <div className="flex flex-1 items-center justify-center text-sm text-gray-500">
+            <div className="flex h-72 items-center justify-center text-sm text-slate-500">
               Select a conversation
             </div>
           ) : (
-            <>
-              <div className="flex items-center justify-between border-b bg-white px-6 py-4">
-                <div>
-                  <h2 className="font-semibold text-gray-900">
-                    Conversation
-                  </h2>
+            <div className="flex h-full min-h-160 flex-col">
+              <div className="border-b border-slate-200 px-5 py-4">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-lg font-semibold text-slate-950">
+                        {selected.customer?.name || "Customer conversation"}
+                      </h2>
+                      <span
+                        className={`rounded-full border px-2 py-1 text-xs font-medium capitalize ${statusClass(
+                          selected.status
+                        )}`}
+                      >
+                        {selected.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {selected.brand?.name || "Brand"} conversation history
+                    </p>
+                  </div>
 
-                  <p className="mt-1 text-xs text-gray-500">
-                    {selected.id}
-                  </p>
+                  <select
+                    value={selected.status}
+                    onChange={(event) => handleStatusChange(event.target.value)}
+                    className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-800 shadow-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                  >
+                    <option value="open">Open</option>
+                    <option value="pending">Pending</option>
+                    <option value="resolved">Resolved</option>
+                  </select>
                 </div>
 
-                <select
-                  value={selected.status}
-                  onChange={(event) =>
-                    handleStatusChange(event.target.value)
-                  }
-                  className="rounded-lg border bg-white px-3 py-2 text-sm"
-                >
-                  <option value="open">Open</option>
-                  <option value="pending">Pending</option>
-                  <option value="closed">Closed</option>
-                </select>
+                <div className="mt-4 rounded-md border border-teal-200 bg-teal-50 px-4 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-teal-700">
+                    Latest Customer Message
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-slate-800">
+                    {latestMessage?.content || "No customer message found."}
+                  </p>
+                </div>
               </div>
 
-              <div className="flex-1 space-y-4 overflow-y-auto p-6">
-                {(selected.messages ?? []).map((message) => {
-                  const content =
-                    message.content ||
-                    message.message ||
-                    "";
-
-                  const role =
-                    message.role ||
-                    message.sender_type ||
-                    "customer";
-
-                  const isCustomer =
-                    role.toLowerCase() === "customer";
-
-                  return (
-                    <div
-                      key={message.id}
-                      className={`flex ${
-                        isCustomer
-                          ? "justify-start"
-                          : "justify-end"
-                      }`}
-                    >
-                      <div
-                        className={`max-w-[70%] rounded-2xl px-4 py-3 ${
-                          isCustomer
-                            ? "bg-white shadow-sm"
-                            : "bg-black text-white"
-                        }`}
-                      >
-                        <p className="mb-1 text-xs font-medium opacity-60">
-                          {role}
-                        </p>
-
-                        <p className="whitespace-pre-wrap text-sm">
-                          {content}
-                        </p>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {(selected.messages ?? []).length === 0 && (
-                  <div className="text-sm text-gray-500">
+              <div className="flex-1 space-y-4 overflow-y-auto bg-slate-50 px-5 py-5">
+                {loadingConversation ? (
+                  <div className="text-sm text-slate-500">Loading conversation...</div>
+                ) : selected.messages.length === 0 ? (
+                  <div className="text-sm text-slate-500">
                     No messages in this conversation.
                   </div>
+                ) : (
+                  selected.messages.map((message) => {
+                    const isCustomer =
+                      message.sender_type?.toLowerCase() === "customer";
+
+                    return (
+                      <div
+                        key={message.id}
+                        className={`flex ${isCustomer ? "justify-start" : "justify-end"}`}
+                      >
+                        <div
+                          className={`max-w-[78%] rounded-lg border px-4 py-3 shadow-sm ${
+                            isCustomer
+                              ? "border-slate-200 bg-white text-slate-900"
+                              : "border-indigo-700 bg-indigo-700 text-white"
+                          }`}
+                        >
+                          <div className="mb-2 flex items-center justify-between gap-4">
+                            <p
+                              className={`text-xs font-semibold capitalize ${
+                                isCustomer ? "text-slate-500" : "text-indigo-100"
+                              }`}
+                            >
+                              {message.sender_type}
+                            </p>
+                            <p
+                              className={`text-xs ${
+                                isCustomer ? "text-slate-400" : "text-indigo-100"
+                              }`}
+                            >
+                              {formatDateTime(message.created_at)}
+                            </p>
+                          </div>
+                          <p className="whitespace-pre-wrap text-sm leading-6">
+                            {message.content}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })
                 )}
               </div>
 
-              {/* REPLY AREA */}
-              <div className="border-t bg-white p-5">
+              <div className="border-t border-slate-200 bg-white px-5 py-4">
                 {!reply ? (
                   <button
                     onClick={handleGenerateReply}
-                    disabled={generating}
-                    className="rounded-lg bg-black px-5 py-3 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={generating || !latestMessage}
+                    className="w-full rounded-md bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
                   >
-                    {generating
-                      ? "Generating AI Reply..."
-                      : "Generate AI Reply"}
+                    {generating ? "Generating AI Reply..." : "Generate AI Reply"}
                   </button>
                 ) : (
-                  <div>
-                    <div className="mb-3 flex items-center justify-between">
-                      <h3 className="font-semibold text-gray-900">
-                        AI Reply
-                      </h3>
-
-                      <span className="rounded-full bg-gray-100 px-3 py-1 text-xs capitalize">
-                        {reply.status}
+                  <div className="space-y-4">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h3 className="text-base font-semibold text-slate-950">
+                          AI Reply
+                        </h3>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Generation {reply.generation_number}
+                        </p>
+                      </div>
+                      <span
+                        className={`w-fit rounded-full border px-3 py-1 text-xs font-medium capitalize ${statusClass(
+                          reply.status
+                        )}`}
+                      >
+                        Status: {reply.status}
                       </span>
                     </div>
 
                     <textarea
-                      value={editedReply}
-                      onChange={(event) =>
-                        setEditedReply(event.target.value)
-                      }
-                      disabled={reply.status === "approved"}
-                      rows={7}
-                      className="w-full resize-none rounded-xl border p-4 text-sm outline-none focus:ring-2 focus:ring-black disabled:bg-gray-100"
+                      value={isApproved ? replyText : editedReply}
+                      onChange={(event) => setEditedReply(event.target.value)}
+                      disabled={isApproved}
+                      rows={8}
+                      className="w-full resize-none rounded-md border border-slate-300 bg-white p-4 text-sm leading-6 text-slate-900 outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100 disabled:border-slate-200 disabled:bg-slate-100"
                     />
 
-                    {reply.status !== "approved" ? (
-  <div className="mt-3 flex gap-2">
-    <button
-      onClick={handleSaveEdit}
-      disabled={saving}
-      className="rounded-lg border px-4 py-2 text-sm hover:bg-gray-50 disabled:opacity-50"
-    >
-      {saving ? "Saving..." : "Save Edit"}
-    </button>
-
-    <button
-      onClick={handleApprove}
-      disabled={saving}
-      className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
-    >
-      {saving ? "Approving..." : "Approve Reply"}
-    </button>
-  </div>
-) : (
-  <div className="mt-3">
-    <span className="inline-flex rounded-lg bg-green-100 px-4 py-2 text-sm font-medium text-green-700">
-      ✓ Reply Approved
-    </span>
-  </div>
-)}
+                    {!isApproved ? (
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                        <button
+                          onClick={handleRegenerateReply}
+                          disabled={generating}
+                          className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {generating ? "Regenerating..." : "Regenerate Reply"}
+                        </button>
+                        <button
+                          onClick={handleSaveEdit}
+                          disabled={saving || !editedReply.trim()}
+                          className="rounded-md border border-teal-600 bg-white px-4 py-2 text-sm font-medium text-teal-700 shadow-sm transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {saving ? "Saving..." : "Save Edit"}
+                        </button>
+                        <button
+                          onClick={handleApprove}
+                          disabled={saving}
+                          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {saving ? "Approving..." : "Approve Reply"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">
+                        Reply approved and locked.
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
-            </>
+            </div>
           )}
         </section>
 
-        {/* RIGHT */}
-        <aside className="border-l bg-white">
-          <div className="border-b px-5 py-4">
-            <h2 className="font-semibold text-gray-900">
-              Customer
-            </h2>
-          </div>
-
-          {!selected ? (
-            <div className="p-5 text-sm text-gray-500">
-              Select a conversation
+        <aside className="space-y-4 xl:min-h-[calc(100vh-126px)]">
+          <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 px-4 py-3">
+              <h2 className="text-sm font-semibold text-slate-900">Customer</h2>
             </div>
-          ) : (
-            <div className="space-y-6 p-5">
-              <div>
-                <p className="text-xs text-gray-500">
-                  Customer ID
-                </p>
+            <div className="space-y-4 px-4 py-4 text-sm">
+              <InfoRow label="Name" value={selected?.customer?.name} />
+              <InfoRow label="Email" value={selected?.customer?.email} />
+              <InfoRow label="Customer ID" value={selected?.customer_id} mono />
+            </div>
+          </section>
 
-                <p className="mt-1 break-all text-sm">
-                  {selected.customer_id}
-                </p>
+          <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 px-4 py-3">
+              <h2 className="text-sm font-semibold text-slate-900">Brand</h2>
+            </div>
+            <div className="space-y-4 px-4 py-4 text-sm">
+              <InfoRow label="Name" value={selected?.brand?.name} />
+              <InfoRow label="Slug" value={selected?.brand?.slug} />
+              <InfoRow label="Brand ID" value={selected?.brand_id} mono />
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="border-b border-slate-200 px-4 py-3">
+              <h2 className="text-sm font-semibold text-slate-900">Order</h2>
+            </div>
+            <div className="space-y-4 px-4 py-4 text-sm">
+              <InfoRow label="Order number" value={selected?.order?.order_number} />
+              <InfoRow label="Product" value={selected?.order?.product_name} />
+              <InfoRow label="Status" value={selected?.order?.status} capitalize />
+              <InfoRow
+                label="Delivery date"
+                value={formatDate(selected?.order?.delivery_date)}
+              />
+            </div>
+          </section>
+
+          {reply && (
+            <section className="rounded-lg border border-slate-200 bg-white shadow-sm">
+              <div className="border-b border-slate-200 px-4 py-3">
+                <h2 className="text-sm font-semibold text-slate-900">
+                  Reply Audit
+                </h2>
               </div>
-
-              {selected.customer?.name && (
-                <div>
-                  <p className="text-xs text-gray-500">
-                    Name
-                  </p>
-
-                  <p className="mt-1 text-sm">
-                    {selected.customer.name}
-                  </p>
-                </div>
-              )}
-
-              {selected.customer?.email && (
-                <div>
-                  <p className="text-xs text-gray-500">
-                    Email
-                  </p>
-
-                  <p className="mt-1 break-all text-sm">
-                    {selected.customer.email}
-                  </p>
-                </div>
-              )}
-
-              {selected.order && (
-                <div className="border-t pt-5">
-                  <p className="font-medium text-gray-900">
-                    Order
-                  </p>
-
-                  <p className="mt-2 break-all text-xs text-gray-500">
-                    {selected.order.id}
-                  </p>
-
-                  {selected.order.status && (
-                    <p className="mt-2 text-sm capitalize">
-                      Status: {selected.order.status}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
+              <div className="space-y-4 px-4 py-4 text-sm">
+                <InfoRow label="Generation" value={String(reply.generation_number)} />
+                <InfoRow label="Created" value={formatDateTime(reply.created_at)} />
+                <InfoRow label="Approved" value={formatDateTime(reply.approved_at)} />
+                <InfoRow
+                  label="Guardrail"
+                  value={reply.retrieved_context?.eligibility_verdict?.action}
+                />
+              </div>
+            </section>
           )}
         </aside>
       </div>
     </main>
+  );
+}
+
+function InfoRow({
+  label,
+  value,
+  mono = false,
+  capitalize = false,
+}: {
+  label: string;
+  value?: string | null;
+  mono?: boolean;
+  capitalize?: boolean;
+}) {
+  return (
+    <div>
+      <p className="text-xs font-medium text-slate-500">{label}</p>
+      <p
+        className={`mt-1 break-words text-slate-900 ${
+          mono ? "font-mono text-xs" : ""
+        } ${capitalize ? "capitalize" : ""}`}
+      >
+        {value || "Not available"}
+      </p>
+    </div>
   );
 }

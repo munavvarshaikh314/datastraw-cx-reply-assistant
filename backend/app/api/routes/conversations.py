@@ -60,7 +60,7 @@ async def update_conversation_status(
     allowed_statuses = {
         "open",
         "pending",
-        "closed",
+        "resolved",
     }
 
     if request.status not in allowed_statuses:
@@ -68,7 +68,7 @@ async def update_conversation_status(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 "Invalid status. "
-                "Allowed values: open, pending, closed."
+                "Allowed values: open, pending, resolved."
             ),
         )
 
@@ -87,9 +87,18 @@ async def update_conversation_status(
     conversation.status = request.status
 
     await session.commit()
-    await session.refresh(conversation)
 
-    return conversation
+    updated_conversation = await repository.get_with_context(
+        conversation_id
+    )
+
+    if updated_conversation is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Conversation not found",
+        )
+
+    return updated_conversation
 
 @router.get(
     "/{conversation_id}",

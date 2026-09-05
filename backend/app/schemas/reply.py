@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -37,6 +38,7 @@ class ReplyGenerationResponse(BaseModel):
     conversation_id: UUID
     generation_number: int
     customer_message: str
+    retrieved_context: dict[str, Any] | list[Any]
     ai_response: str | None
     edited_response: str | None
     final_response: str | None

@@ -1,4 +1,14 @@
-const API_BASE_URL = "http://127.0.0.1:8000/api";
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000/api";
+
+async function parseApiError(response: Response, fallback: string) {
+  try {
+    const payload = await response.json();
+    return payload.detail || fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 export async function getConversations() {
   const response = await fetch(API_BASE_URL + "/conversations", {
@@ -6,7 +16,9 @@ export async function getConversations() {
   });
 
   if (!response.ok) {
-    throw new Error("Failed to fetch conversations");
+    throw new Error(
+      await parseApiError(response, "Failed to fetch conversations")
+    );
   }
 
   return response.json();
@@ -21,7 +33,9 @@ export async function getConversation(id: string) {
   );
 
   if (!response.ok) {
-    throw new Error("Failed to fetch conversation");
+    throw new Error(
+      await parseApiError(response, "Failed to fetch conversation")
+    );
   }
 
   return response.json();
@@ -45,7 +59,9 @@ export async function updateConversationStatus(
   );
 
   if (!response.ok) {
-    throw new Error("Failed to update conversation status");
+    throw new Error(
+      await parseApiError(response, "Failed to update conversation status")
+    );
   }
 
   return response.json();
@@ -71,7 +87,9 @@ export async function generateReply(
   );
 
   if (!response.ok) {
-    throw new Error("Failed to generate reply");
+    throw new Error(
+      await parseApiError(response, "Failed to generate reply")
+    );
   }
 
   return response.json();
@@ -95,7 +113,9 @@ export async function updateReply(
   );
 
   if (!response.ok) {
-    throw new Error("Failed to update reply");
+    throw new Error(
+      await parseApiError(response, "Failed to update reply")
+    );
   }
 
   return response.json();
@@ -113,7 +133,9 @@ export async function approveReply(replyId: string) {
   );
 
   if (!response.ok) {
-    throw new Error("Failed to approve reply");
+    throw new Error(
+      await parseApiError(response, "Failed to approve reply")
+    );
   }
 
   return response.json();
